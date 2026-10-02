@@ -41,10 +41,9 @@ private const BLOCK: usize = 512
 // Only the program's thread calls this.
 //
 // **It renders into a block of its own and copies, rather than handing the synth a view of the ring's
-// array.** A view of storage inside a `&sync` box takes a share of the box, and sysl 0.0.155 takes it
-// with a plain load-add-store of the box's count while the audio thread is changing the same count
-// atomically -- ThreadSanitizer reports the race on the box's first word. Indexing the array takes no
-// share at all.
+// array.** A slice does not record whether its owner's count is atomic, so storage inside a `&sync`
+// box cannot be sliced (`reference/arrays.md`): the synth renders into a local block, and indexing
+// the ring's array copies it across without taking a share of the box at all.
 private[musicbox_miniaudio] fill(r: &sync Ring, s: *Synth) -> bool
     val w = r.written.load(Acquire)
     val room = RING - usize(w - r.taken.load(Acquire))

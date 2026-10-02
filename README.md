@@ -131,28 +131,11 @@ not merely weaker but wrong: `Atomic[u64].load` is called out of line into it, s
 reaches TSan, and it reports the ring's correctly ordered slot accesses as races. The tell is an
 `nm -u` with no `__tsan_atomic64_load`.
 
-**TSan found one real race on the way, in the compiler rather than here**: a view of the ring's
-array (`r.samples[a..<b]` on the `&sync` box) takes its share of the box with a plain load-add-store
-of the box's count, while the audio thread changes the same word atomically. `fill` renders into a
-block of its own and copies by index instead, which takes no share.
-
-## Developing it before its dependencies are tagged
-
-Neither `musicbox` nor `miniaudio` had a `v0.1.0` tag when this was written, and `--lib` does not
-shadow a coordinate the compiler cannot fetch (it tries the fetch first and stops at *"Remote branch
-v0.1.0 not found"*). What works is a package cache of your own whose `v0.1.0` entries are the local
-checkouts:
-
-```
-C=/tmp/mbma-cache
-mkdir -p $C/sysl/pkg/github.com/sysl-lang/musicbox $C/sysl/pkg/github.com/sysl-lang/miniaudio
-ln -s ~/dev/sysl-lang/musicbox $C/sysl/pkg/github.com/sysl-lang/musicbox/@v0.1.0
-ln -s ~/dev/sysl-lang/miniaudio $C/sysl/pkg/github.com/sysl-lang/miniaudio/@v0.1.0
-XDG_CACHE_HOME=$C sysl test .
-```
-
-A cache entry with no recorded hash is accepted when the project has no `sysl.sum` line for it, and
-nothing is written into this repository. Once both are tagged, the bare `sysl test .` is the command.
+**`fill` copies into the ring by index, and that is the language's intended form.** A slice does not
+record whether its owner's count is atomic, so storage inside a `&sync` box cannot be sliced
+(`reference/arrays.md`) — `r.samples[a..<b]` on the ring is refused. The synth renders into a block
+of `fill`'s own, and indexing the ring's array copies it across without taking a share of the box.
+This is why the package states `sysl = "0.0.156"`, the release that states the rule.
 
 ## Licence
 
