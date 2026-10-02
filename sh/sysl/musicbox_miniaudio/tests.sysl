@@ -1,0 +1,203 @@
+module sh.sysl.musicbox_miniaudio
+@tests
+
+import sh.sysl.musicbox.{Score, score, note, instrument, synth, Partial, adsr}
+import sh.sysl.miniaudio.{Frames, Format, Null, S16, S32, F32, Unknown}
+import sysl.sync.{Atomic, Acquire, Release}
+import sysl.posix.time.sleep
+import sysl.time.millis
+
+// Every device here is miniaudio's null backend: a real audio thread paced by the clock, playing into
+// nothing. What the device was handed is read back through the player's own `monitor` seam, which
+// sees each period's buffer after the ring has been drained into it -- so a test compares exactly the
+// samples a speaker would have been given against what musicbox renders for the score.
+
+private const CAP: usize = 49152
+
+// What the device was handed, one sample per frame, and whether a frame's channels ever disagreed.
+struct Capture
+    samples: [CAP]i16
+    frames: Atomic[u64]
+    calls: Atomic[u64]
+    uneven: Atomic[u64]
+
+private capture() -> &sync Capture = Capture([0; CAP], Atomic(0), Atomic(0), Atomic(0))
+
+private record(cap: &sync Capture) -> &sync Fn(Frames) -> unit = (f: Frames) ->
+    val ch = usize(f.output_channels)
+    val start = cap.frames.load(Acquire)
+    val n = usize(f.count)
+
+    if f.output_format == S16
+        val out = f.output_s16()
+
+        for i in 0..<n
+            for c in 1..<ch
+                if out[i * ch + c] != out[i * ch] then cap.uneven.add(1)
+            if start + u64(i) < u64(CAP) then cap.samples[usize(start) + i] = out[i * ch]
+    else
+        val out = f.output_f32()
+
+        for i in 0..<n
+            for c in 1..<ch
+                if out[i * ch + c] != out[i * ch] then cap.uneven.add(1)
+            if start + u64(i) < u64(CAP) then cap.samples[usize(start) + i] = i16(out[i * ch] * 32768.0)
+
+    cap.frames.store(start + u64(n), Release)
+    cap.calls.add(1)
+
+// One sine held for `seconds`, with a short release, so that nearly every sample is not zero and a
+// stretch of zeros can only be silence the ring wrote.
+private tone(seconds: real) -> Score
+    val ins = [instrument([Partial(1.0, 0.8)], adsr(0.005, 0.01, 1.0, 0.05)).unwrap()]
+    score([note(0.0, seconds, 440.0)], ins).unwrap()
+
+// Whether the first `n` samples captured are the first `n` musicbox renders for `sc` at `rate`. It
+// renders in blocks of its own size, unlike the player's, which is part of the claim.
+private agrees(cap: &sync Capture, sc: Score, rate: u32, n: u64) -> bool
+    var s = synth(sc, rate).unwrap()
+    var chunk: [256]i16 = [0; 256]
+    var i: usize = 0
+
+    while u64(i) < n
+        s.render(chunk[..])
+        for j in 0..<chunk.len
+            if u64(i + j) < n && cap.samples[i + j] != chunk[j] then return false
+        i += 256
+
+    true
+end agrees
+
+// Whether every sample captured from `from` onwards is silence.
+private silent_from(cap: &sync Capture, from: u64) -> bool
+    val end = cap.frames.load(Acquire)
+    var i = from
+
+    while i < end && i < u64(CAP)
+        if cap.samples[usize(i)] != 0 then return false
+        i += 1
+
+    true
+
+// Play a short score to the end through `format` on `channels`, and check the device was handed the
+// score sample for sample on every channel.
+private plays_exactly(format: Format, channels: u32)
+    val cap = capture()
+    val sc = tone(0.1)
+    val p = player(sc, [Null], format, channels, Some(record(cap))).unwrap()
+
+    assert_eq(p.format(), format)
+    assert_eq(p.channels(), channels)
+    assert(!p.done())
+
+    p.play_until_done()
+
+    assert(p.done())
+    assert(p.played() > u64(p.sample_rate() / 10))
+    assert(cap.frames.load() >= p.played())
+    assert_eq(p.underruns(), 0)
+    assert_eq(cap.uneven.load(), 0)
+    assert(agrees(cap, sc, p.sample_rate(), p.played()))
+    assert(silent_from(cap, p.played()))
+
+@test("a score plays to the end, and the device is handed exactly what musicbox renders, as f32 stereo")
+plays_f32_stereo() = plays_exactly(F32, 2)
+
+@test("the same through s16 mono")
+plays_s16_mono() = plays_exactly(S16, 1)
+
+@test("one mono sample is duplicated onto each of three s16 channels")
+plays_s16_three() = plays_exactly(S16, 3)
+
+@test("and onto each of six f32 channels")
+plays_f32_six() = plays_exactly(F32, 6)
+
+@test("a score longer than the ring is pumped through it, wrapping, without a gap")
+plays_past_the_ring()
+    val cap = capture()
+    val sc = tone(0.8)
+    val p = player(sc, [Null], F32, 2, Some(record(cap))).unwrap()
+
+    p.play_until_done()
+
+    assert(p.played() > u64(RING) + u64(RING))
+    assert_eq(p.underruns(), 0)
+    assert(agrees(cap, sc, p.sample_rate(), p.played()))
+    assert(silent_from(cap, p.played()))
+
+@test("a ring left to run dry plays silence, not the stale samples still in its slots")
+underrun_is_silence()
+    val cap = capture()
+    val sc = tone(2.0)
+    val p = player(sc, [Null], S16, 2, Some(record(cap))).unwrap()
+
+    // Filled once before the start and never again: every slot holds a sample by the time it runs
+    // out, so reading past the end would play something loud.
+    sleep(millis(600))
+    p.stop()
+
+    assert_eq(p.played(), u64(RING))
+    assert(p.underruns() > 0)
+    assert(cap.frames.load() > u64(RING))
+    assert(agrees(cap, sc, p.sample_rate(), p.played()))
+    assert(silent_from(cap, p.played()))
+    assert_eq(cap.uneven.load(), 0)
+
+@test("stopping mid-score closes the device at once, and pumping or stopping again does nothing")
+stop_mid_score()
+    val cap = capture()
+    val p = player(tone(2.0), [Null], F32, 2, Some(record(cap))).unwrap()
+
+    for _ in 0..<20
+        p.pump()
+        sleep(millis(5))
+
+    p.stop()
+    assert(p.done())
+
+    val calls = cap.calls.load()
+    val played = p.played()
+
+    assert(calls > 0)
+    sleep(millis(50))
+    p.pump()
+    p.stop()
+
+    assert_eq(cap.calls.load(), calls)
+    assert_eq(p.played(), played)
+    assert_eq(p.underruns(), 0)
+
+// A player that is let go of while it is still playing.
+private play_briefly(cap: &sync Capture)
+    val p = player(tone(2.0), [Null], F32, 1, Some(record(cap))).unwrap()
+
+    sleep(millis(30))
+    assert(p.played() > 0)
+
+@test("dropping a playing player closes its device")
+drop_closes()
+    val cap = capture()
+
+    play_briefly(cap)
+
+    val calls = cap.calls.load()
+
+    sleep(millis(50))
+    assert_eq(cap.calls.load(), calls)
+
+@test("the device's own format is taken when it is one the ring can write")
+own_format()
+    val p = player(tone(0.05), [Null], Unknown, 0).unwrap()
+
+    assert(p.format() == F32 || p.format() == S16)
+    assert(p.channels() > 0)
+    p.play_until_done()
+    assert(p.done())
+
+@test("a format the ring cannot write is refused before a device is opened")
+unsupported_format()
+    assert_eq(player(tone(0.05), [Null], S32).err(), Some(Unsupported(S32)))
+
+@test("play returns once the score has finished")
+play_blocks()
+    assert(play(tone(0.05), [Null]).is_ok())
