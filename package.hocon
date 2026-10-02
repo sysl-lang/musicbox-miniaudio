@@ -1,0 +1,35 @@
+// A musicbox score played through miniaudio: the adapter between a synthesizer that is handed a
+// buffer and a device that asks for one on its own thread.
+//
+// This is the block a consumer writes to reach this package:
+//
+//     dependencies {
+//       musicbox-miniaudio { git = "github.com/sysl-lang/musicbox-miniaudio", version = "0.1.0" }
+//     }
+//
+// The module a program imports is `sh.sysl.musicbox_miniaudio` -- flat rather than under
+// `sh.sysl.musicbox`, because one package's module path may not nest inside another's.
+
+package {
+  name    = "musicbox-miniaudio"
+  version = "0.1.0"
+
+  // The compiler this was written and tested against, and the one both dependencies state.
+  sysl    = "0.0.155"
+}
+
+// A program that plays a score imports musicbox for the score and this package for the playing, so
+// both are named here; miniaudio is named because the error and format types of its surface are
+// miniaudio's.
+dependencies {
+  musicbox  { git = "github.com/sysl-lang/musicbox", version = "0.1.0" }
+  miniaudio { git = "github.com/sysl-lang/miniaudio", version = "0.1.0" }
+}
+
+// **What miniaudio needs, and nothing more.** musicbox asks for nothing at all; miniaudio is a hosted
+// library with an audio thread and a heap-allocated device. The one thing this package adds is a
+// sleep between pumps in `play_until_done`, which `posix` already covers.
+requires {
+  heap  = true
+  posix = true
+}

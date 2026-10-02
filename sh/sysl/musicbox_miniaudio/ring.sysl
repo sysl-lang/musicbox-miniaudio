@@ -1,0 +1,86 @@
+// The samples between the program's thread and the audio thread.
+//
+// **The synth cannot go to the audio thread, so its samples do.** A `Synth` holds its score, and a
+// score holds the caller's notes as views; a view owns its elements through a count that is not
+// atomic, so the compiler refuses a `&sync` box with a synth in it. What crosses instead is this
+// ring: a fixed array of 16-bit samples and two counters, every one of which is safe to share. The
+// program's thread renders into it ahead of time and the data callback copies out of it.
+//
+// **One writer and one reader, so two atomics are the whole of the synchronisation.** `written` is
+// only ever stored by the thread that renders and `taken` only by the callback. Each side reads the
+// other's counter with `Acquire` before touching a slot and publishes its own with `Release` after,
+// so a slot is never read before its sample is in it nor overwritten before it has been read. No
+// lock, and nothing the audio thread could wait on.
+
+module sh.sysl.musicbox_miniaudio
+
+import sh.sysl.musicbox.Synth
+import sh.sysl.miniaudio.{Frames, S16, F32}
+import sysl.sync.{Atomic, Acquire, Release}
+
+// How many samples the ring holds: a third of a second at 48 kHz, which is far more than any device
+// period and long enough that a program pumping once a frame never lets it run dry.
+const RING: usize = 16384
+
+// The ring itself. It lives in a `&sync` box that the data callback holds a share of, so it outlives
+// the device whatever order a program lets go of things in.
+struct Ring
+    private[musicbox_miniaudio] samples: [RING]i16
+    private[musicbox_miniaudio] written: Atomic[u64]     // samples ever rendered in
+    private[musicbox_miniaudio] taken: Atomic[u64]       // samples ever copied out
+    private[musicbox_miniaudio] ended: Atomic[u32]       // 1 once the synth has nothing more
+    private[musicbox_miniaudio] starved: Atomic[u64]     // frames of silence played before the end
+
+private[musicbox_miniaudio] ring() -> &sync Ring =
+    Ring([0; RING], Atomic(0), Atomic(0), Atomic(0), Atomic(0))
+
+// Render as much of the score as there is room for, and answer whether the synth has more to give.
+// Only the program's thread calls this.
+private[musicbox_miniaudio] fill(r: &sync Ring, s: *Synth) -> bool
+    val w = r.written.load(Acquire)
+    val room = RING - usize(w - r.taken.load(Acquire))
+    var more = true
+    var done: usize = 0
+
+    while done < room && more
+        val at = usize((w + u64(done)) % u64(RING))
+        val n = if room - done < RING - at then room - done else RING - at
+
+        more = s.render(r.samples[at..<at + n])
+        done += n
+
+    r.written.store(w + u64(done), Release)
+
+    if !more then r.ended.store(1, Release)
+    more
+end fill
+
+// Copy the next period's samples into the device's buffer, every channel of a frame getting the same
+// sample, and silence for whatever the ring cannot supply. Only the audio thread calls this.
+private[musicbox_miniaudio] drain(r: &sync Ring, f: Frames)
+    // Read before `written`, so that an end seen here means every sample is already counted in it
+    // and a shortfall is the score finishing rather than the program falling behind.
+    val ended = r.ended.load(Acquire) == 1
+    val t = r.taken.load(Acquire)
+    val ready = usize(r.written.load(Acquire) - t)
+    val frames = usize(f.count)
+    val ch = usize(f.output_channels)
+    val n = if ready < frames then ready else frames
+
+    if f.output_format == S16
+        val out = f.output_s16()
+
+        for i in 0..<frames
+            val v = if i < n then r.samples[usize((t + u64(i)) % u64(RING))] else 0
+            for c in 0..<ch do out[i * ch + c] = v
+    else if f.output_format == F32
+        val out = f.output_f32()
+
+        for i in 0..<frames
+            val v = if i < n then f32(r.samples[usize((t + u64(i)) % u64(RING))]) / 32768.0 else 0.0
+            for c in 0..<ch do out[i * ch + c] = v
+
+    r.taken.store(t + u64(n), Release)
+
+    if n < frames && !ended then r.starved.add(u64(frames - n))
+end drain

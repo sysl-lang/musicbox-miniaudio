@@ -1,0 +1,139 @@
+// A musicbox score played through a miniaudio device.
+//
+//     val p = player(sc)?          // the default device, at its own rate, already playing
+//     loop
+//         p.pump()                  // once a frame, or whenever the program comes round
+//         if p.done() then break
+//         ...the program's own work...
+//
+//     play(sc)?                    // or all of it, returning when the last note has died away
+//
+// **The synth runs on the program's thread and the device's callback only copies.** `pump` renders
+// ahead into a ring of samples the callback shares (`ring.sysl` says why it has to be that way
+// round), so the audio thread never runs anything slower than a copy and a program decides when the
+// rendering happens. If it falls more than a third of a second behind, the device plays silence until
+// it catches up, and `underruns` counts the frames that went silent.
+
+module sh.sysl.musicbox_miniaudio
+
+import sh.sysl.musicbox.{Score, Synth, MusicError, synth}
+import sh.sysl.miniaudio.{Backend, Device, Error, Format, Frames, S16, F32, Unknown, context, stream}
+import sysl.sync.Acquire
+import sysl.posix.time.sleep
+import sysl.time.millis
+
+/** Why a score could not be played. */
+enum PlayError derives Eq, Display
+    /** miniaudio could not open or start the device. */
+    Audio(error: Error)
+
+    /** musicbox refused to build a synth for the score at the device's rate. */
+    Music(error: MusicError)
+
+    /** The device's format is one this package does not write -- only `S16` and `F32` are. */
+    Unsupported(format: Format)
+
+impl From[Error] for PlayError
+    from(e: Error) -> PlayError = Audio(e)
+
+impl From[MusicError] for PlayError
+    from(e: MusicError) -> PlayError = Music(e)
+
+/** A score playing on a device. Reached through `&Player`; dropping the last one closes the device. */
+struct Player
+    private dev: &Device
+    private ring: &sync Ring
+    private synth: Synth
+    private more: bool
+    private stopped: bool
+
+    // What the device opened with, kept here because a closed device answers zero for all of it.
+    private fmt: Format
+    private chans: u32
+
+    /** Render as much of the score as the ring has room for. Call it often enough that the device
+     * never catches up -- once a frame of a game loop is plenty. Does nothing once the score is
+     * rendered or the player stopped.
+     */
+    pump(*self)
+        if self.more && !self.stopped then self.more = fill(self.ring, &self.synth)
+
+    /** Whether nothing more will be heard: the device has played every sample of the score, or the
+     * player was stopped.
+     */
+    done(self) -> bool =
+        self.stopped || (!self.more && self.ring.taken.load(Acquire) == self.ring.written.load(Acquire))
+
+    /** Pump until the score has finished playing, then close the device. */
+    play_until_done(*self)
+        loop
+            self.pump()
+            if self.done() then break
+            sleep(millis(5))
+
+        self.stop()
+
+    /** Close the device now. When this returns the callback is not running and never will again. */
+    stop(*self)
+        self.dev.close()
+        self.stopped = true
+
+    /** The rate the score is rendered at: the device's own. */
+    sample_rate(self) -> u32 = self.synth.sample_rate()
+
+    /** How many channels each sample is written to. */
+    channels(self) -> u32 = self.chans
+
+    /** The sample format the device is fed in, `S16` or `F32`. */
+    format(self) -> Format = self.fmt
+
+    /** How many samples of the score the device has played so far. */
+    played(self) -> u64 = self.ring.taken.load(Acquire)
+
+    /** How many frames went silent because the ring ran dry before the score had finished -- zero for
+     * a program that pumps often enough.
+     */
+    underruns(self) -> u64 = self.ring.starved.load(Acquire)
+
+    /** The device, for its volume and what the backend opened. */
+    device(self) -> &Device = self.dev
+end Player
+
+/** Start playing `score` on the default playback device, at the device's own rate.
+ *
+ * The device is fed `format` -- `F32` or `S16`, which miniaudio converts to whatever the hardware
+ * takes, or `Unknown` for the hardware's own when that is one of the two -- on `channels` channels,
+ * `0` meaning the device's own count; every channel gets the same mono sample. `backends` are tried in
+ * order, miniaudio's platform default when empty. `monitor`, when given, is called on the audio
+ * thread after each period has been written, with the same `Frames` -- a level meter, or a test
+ * reading what the device was handed.
+ *
+ * The ring is filled before the device starts, so the first period is never silence.
+ */
+player(score: Score, backends: []const Backend = [], format: Format = F32, channels: u32 = 0,
+       monitor: Option[&sync Fn(Frames) -> unit] = None) -> Result[&Player, PlayError]
+    if format != F32 && format != S16 && format != Unknown then return Err(Unsupported(format))
+
+    val r = ring()
+    val d = context(backends)?.playback(stream(format, channels), 0, (f: Frames) ->
+        drain(r, f)
+        monitor match
+            Some(m) -> m(f)
+            None -> ())?
+
+    val got = d.playback_format()
+    if got != F32 && got != S16
+        d.close()
+        return Err(Unsupported(got))
+
+    val p: &Player = Player(d, r, synth(score, d.sample_rate())?, true, false, got, d.playback_channels())
+
+    p.pump()
+    d.start()?
+    Ok(p)
+end player
+
+/** Play `score` on the default device from start to finish, and return once it has died away. */
+play(score: Score, backends: []const Backend = []) -> Result[unit, PlayError]
+    player(score, backends)?.play_until_done()
+    Ok(())
