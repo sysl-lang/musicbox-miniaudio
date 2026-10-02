@@ -14,8 +14,8 @@ package {
   name    = "musicbox-miniaudio"
   version = "0.1.0"
 
-  // The compiler this was written and tested against, and the one both dependencies state.
-  sysl    = "0.0.155"
+  // 0.0.156 refuses a view of storage inside a `&sync` box, which is why `fill` copies by index.
+  sysl    = "0.0.156"
 }
 
 // A program that plays a score imports musicbox for the score and this package for the playing, so
