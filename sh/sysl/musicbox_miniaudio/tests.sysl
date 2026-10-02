@@ -122,6 +122,7 @@ plays_past_the_ring()
 
     assert(p.played() > u64(RING) + u64(RING))
     assert_eq(p.underruns(), 0)
+    assert_eq(cap.uneven.load(), 0)
     assert(agrees(cap, sc, p.sample_rate(), p.played()))
     assert(silent_from(cap, p.played()))
 

@@ -34,19 +34,29 @@ struct Ring
 private[musicbox_miniaudio] ring() -> &sync Ring =
     Ring([0; RING], Atomic(0), Atomic(0), Atomic(0), Atomic(0))
 
+// How many samples are rendered at a time before being copied into the ring.
+private const BLOCK: usize = 512
+
 // Render as much of the score as there is room for, and answer whether the synth has more to give.
 // Only the program's thread calls this.
+//
+// **It renders into a block of its own and copies, rather than handing the synth a view of the ring's
+// array.** A view of storage inside a `&sync` box takes a share of the box, and sysl 0.0.155 takes it
+// with a plain load-add-store of the box's count while the audio thread is changing the same count
+// atomically -- ThreadSanitizer reports the race on the box's first word. Indexing the array takes no
+// share at all.
 private[musicbox_miniaudio] fill(r: &sync Ring, s: *Synth) -> bool
     val w = r.written.load(Acquire)
     val room = RING - usize(w - r.taken.load(Acquire))
+    var block: [BLOCK]i16 = [0; BLOCK]
     var more = true
     var done: usize = 0
 
     while done < room && more
-        val at = usize((w + u64(done)) % u64(RING))
-        val n = if room - done < RING - at then room - done else RING - at
+        val n = if room - done < BLOCK then room - done else BLOCK
 
-        more = s.render(r.samples[at..<at + n])
+        more = s.render(block[0..<n])
+        for i in 0..<n do r.samples[usize((w + u64(done + i)) % u64(RING))] = block[i]
         done += n
 
     r.written.store(w + u64(done), Release)
