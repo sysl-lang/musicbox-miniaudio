@@ -3,6 +3,8 @@
 A [musicbox](https://github.com/sysl-lang/musicbox) score played through
 [miniaudio](https://github.com/sysl-lang/miniaudio) — module `sh.sysl.musicbox_miniaudio`.
 
+*An independent sysl package for miniaudio. It is not affiliated with or endorsed by miniaudio's authors or trademark holders.*
+
 ```hocon
 dependencies {
   musicbox           { git = "github.com/sysl-lang/musicbox", version = "0.1.4" }
