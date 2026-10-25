@@ -7,8 +7,8 @@ A [musicbox](https://github.com/sysl-lang/musicbox) score played through
 
 ```hocon
 dependencies {
-  musicbox           { git = "github.com/sysl-lang/musicbox", version = "0.1.4" }
-  musicbox-miniaudio { git = "github.com/sysl-lang/musicbox-miniaudio", version = "0.1.1" }
+  musicbox           { git = "github.com/sysl-lang/musicbox", version = "0.1.5" }
+  musicbox-miniaudio { git = "github.com/sysl-lang/musicbox-miniaudio", version = "0.1.2" }
 }
 ```
 
