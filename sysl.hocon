@@ -4,7 +4,7 @@
 // This is the block a consumer writes to reach this package:
 //
 //     dependencies {
-//       musicbox-miniaudio { git = "github.com/sysl-lang/musicbox-miniaudio", version = "0.1.2" }
+//       musicbox-miniaudio { git = "github.com/sysl-lang/musicbox-miniaudio", version = "0.1.3" }
 //     }
 //
 // The module a program imports is `sh.sysl.musicbox_miniaudio` -- flat rather than under
@@ -12,17 +12,17 @@
 
 package {
   name    = "musicbox-miniaudio"
-  version = "0.1.2"
+  version = "0.1.3"
 
   // 0.0.156 refuses a view of storage inside a `&sync` box, which is why `fill` copies by index.
-  sysl    = "0.6.0"
+  sysl    = "0.8.0"
 }
 
 // A program that plays a score imports musicbox for the score and this package for the playing, so
 // both are named here; miniaudio is named because the error and format types of its surface are
 // miniaudio's.
 dependencies {
-  musicbox  { git = "github.com/sysl-lang/musicbox", version = "0.1.5" }
+  musicbox  { git = "github.com/sysl-lang/musicbox", version = "0.1.6" }
   miniaudio { git = "github.com/sysl-lang/miniaudio", version = "0.1.2" }
 }
 
