@@ -15,6 +15,9 @@ import sysl.time.millis
 private const CAP: usize = 49152
 
 // What the device was handed, one sample per frame, and whether a frame's channels ever disagreed.
+// Shareable because only the audio thread writes `samples`, and a test reads them after the
+// device has stopped.
+@unchecked(Share)
 struct Capture
     samples: [CAP]i16
     frames: Atomic[u64]

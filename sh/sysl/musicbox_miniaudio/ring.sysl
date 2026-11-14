@@ -24,6 +24,10 @@ const RING: usize = 16384
 
 // The ring itself. It lives in a `&sync` box that the data callback holds a share of, so it outlives
 // the device whatever order a program lets go of things in.
+//
+// Sharing is safe because there is one writer and one reader and the counters hand each slot over:
+// a slot is written only while `written`/`taken` say the reader cannot be looking at it.
+@unchecked(Share)
 struct Ring
     private[musicbox_miniaudio] samples: [RING]i16
     private[musicbox_miniaudio] written: Atomic[u64]     // samples ever rendered in
